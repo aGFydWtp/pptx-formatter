@@ -1,0 +1,14 @@
+[project]
+name = "pptx-formatter"
+version = "0.1.0"
+description = "Tool for generating PowerPoint presentations from template using LangGraph"
+authors = [{name = "AutoAgent"}]
+requires-python = ">=3.10"
+dependencies = [
+    "python-pptx",
+    "langgraph",
+    "Pillow"
+]
+
+[project.scripts]
+pptx-formatter = "pptx_formatter.main:main"
