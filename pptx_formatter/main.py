@@ -5,7 +5,7 @@ from pathlib import Path
 from threading import Lock
 from typing import List, Optional
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops, ImageDraw
 
 from pptx import Presentation
 from langgraph.graph import END, StateGraph
@@ -19,25 +19,70 @@ class SlideResult:
     feedback: Optional[str] = None
 
 
-def ai_judgement(state: dict) -> dict:
-    """Placeholder AI judgement step."""
-    # In real implementation, call an LLM or other model.
-    state["ai_ok"] = True
+def analyze_slide(state: dict) -> dict:
+    """Analyze slide content type and render the original slide."""
+    slide = state["slide"]
+    img_dir: Path = state["img_dir"]
+    img_dir.mkdir(parents=True, exist_ok=True)
+    img_path = img_dir / f"orig_{state['index']}.jpg"
+
+    text_shapes = 0
+    has_picture = False
+
+    img = Image.new("RGB", (1280, 720), color="white")
+    draw = ImageDraw.Draw(img)
+    y = 10
+    for shape in slide.shapes:
+        if shape.shape_type == 13:  # PICTURE (simplified)
+            has_picture = True
+        if shape.has_text_frame:
+            text_shapes += 1
+            draw.text((10, y), shape.text, fill="black")
+            y += 20
+
+    img.save(img_path, format="JPEG")
+    state["orig_img"] = img_path
+
+    if has_picture:
+        state["content_type"] = "image"
+    elif text_shapes > 2:
+        state["content_type"] = "text"
+    else:
+        state["content_type"] = "complex"
     return state
 
 
-def apply_template(state: dict) -> dict:
-    """Copy the slide to a new presentation using the template."""
+def select_template(state: dict) -> dict:
+    """Select a template layout based on content type."""
+    template: Presentation = state["template"]
+    tried = state.setdefault("tried_layouts", set())
+    content = state.get("content_type", "text")
+
+    layout_map = {"text": 0, "image": 1, "complex": 2}
+    preferred = layout_map.get(content, 0)
+
+    for idx in range(len(template.slide_layouts)):
+        candidate = (preferred + idx) % len(template.slide_layouts)
+        if candidate not in tried:
+            state["layout_idx"] = candidate
+            tried.add(candidate)
+            break
+    else:
+        state["layout_idx"] = 0
+    return state
+
+
+def apply_layout(state: dict) -> dict:
+    """Apply selected layout and copy text shapes."""
     template: Presentation = state["template"]
     slide = state["slide"]
     output: Presentation = state["output"]
     lock: Lock = state["lock"]
+    layout_idx = state.get("layout_idx", 0)
 
-    layout = template.slide_layouts[0]
     with lock:
+        layout = template.slide_layouts[layout_idx]
         new_slide = output.slides.add_slide(layout)
-
-        # Example: copy all shapes text from source slide
         for shape in slide.shapes:
             if not shape.has_text_frame:
                 continue
@@ -53,12 +98,26 @@ def apply_template(state: dict) -> dict:
     return state
 
 
-def convert_to_jpeg(state: dict) -> dict:
-    """Render the new slide to a JPEG file."""
+def mechanical_rules(state: dict) -> dict:
+    """Placeholder for mechanical placement rules."""
+    return apply_layout(state)
+
+
+def ai_placement(state: dict) -> dict:
+    """Placeholder for AI-driven placement."""
+    return apply_layout(state)
+
+
+def hybrid_placement(state: dict) -> dict:
+    """Placeholder for hybrid placement."""
+    return apply_layout(state)
+
+
+def render_new_slide(state: dict) -> dict:
+    """Render the new slide to JPEG."""
     slide = state["new_slide"]
     img_dir: Path = state["img_dir"]
-    img_dir.mkdir(parents=True, exist_ok=True)
-    img_path = img_dir / f"slide_{state['index']}.jpg"
+    img_path = img_dir / f"new_{state['index']}.jpg"
 
     img = Image.new("RGB", (1280, 720), color="white")
     draw = ImageDraw.Draw(img)
@@ -70,56 +129,69 @@ def convert_to_jpeg(state: dict) -> dict:
         y += 20
     img.save(img_path, format="JPEG")
 
-    state["img_path"] = img_path
+    state["new_img"] = img_path
     return state
 
 
-def quality_check(state: dict) -> dict:
-    """Simple quality check based on slide content."""
-    slide = state["new_slide"]
-    text_content = "\n".join(
-        shape.text for shape in slide.shapes if shape.has_text_frame
-    )
-    state["quality_ok"] = "FAIL" not in text_content
+def compare_images(state: dict) -> dict:
+    """Compare original and templated images."""
+    orig = Image.open(state["orig_img"])
+    new = Image.open(state["new_img"])
+    diff = ImageChops.difference(orig, new)
+    state["quality_ok"] = diff.getbbox() is None
     return state
 
 
 def generate_feedback(state: dict) -> dict:
-    state["feedback"] = f"Slide {state['index']} failed quality check"
+    state["feedback"] = f"Slide {state['index']} failed layout {state.get('layout_idx')}"
     state["attempts"] = state.get("attempts", 0) + 1
     return state
 
 
 def mark_result(state: dict) -> SlideResult:
-    feedback = None if state.get("quality_ok", False) else "Quality check failed"
+    feedback = None if state.get("quality_ok", False) else state.get("feedback")
     return SlideResult(index=state["index"], success=state.get("quality_ok", False), feedback=feedback)
 
 
 def build_graph() -> Pregel:
     graph = StateGraph(dict)
-    graph.add_node("ai", ai_judgement)
-    graph.add_node("template", apply_template)
-    graph.add_node("jpeg", convert_to_jpeg)
-    graph.add_node("quality", quality_check)
+    graph.add_node("analyze", analyze_slide)
+    graph.add_node("select", select_template)
+    graph.add_node("mechanical", mechanical_rules)
+    graph.add_node("ai_place", ai_placement)
+    graph.add_node("hybrid", hybrid_placement)
+    graph.add_node("render", render_new_slide)
+    graph.add_node("compare", compare_images)
     graph.add_node("feedback", generate_feedback)
 
-    graph.set_entry_point("ai")
-    graph.add_edge("ai", "template")
-    graph.add_edge("template", "jpeg")
-    graph.add_edge("jpeg", "quality")
+    graph.set_entry_point("analyze")
+    graph.add_edge("analyze", "select")
+
+    def route_content(state: dict) -> str:
+        return state.get("content_type", "text")
+
+    graph.add_conditional_edges(
+        "select", route_content, {"text": "mechanical", "image": "ai_place", "complex": "hybrid"}
+    )
+
+    graph.add_edge("mechanical", "render")
+    graph.add_edge("ai_place", "render")
+    graph.add_edge("hybrid", "render")
+    graph.add_edge("render", "compare")
+
 
     def route_quality(state: dict) -> str:
         return "ok" if state.get("quality_ok") else "fail"
 
     graph.add_conditional_edges(
-        "quality", route_quality, {"ok": END, "fail": "feedback"}
+        "compare", route_quality, {"ok": END, "fail": "feedback"}
     )
 
     def route_feedback(state: dict) -> str:
         return "retry" if state.get("attempts", 0) < 3 else "done"
 
     graph.add_conditional_edges(
-        "feedback", route_feedback, {"retry": "ai", "done": END}
+        "feedback", route_feedback, {"retry": "select", "done": END}
     )
 
     return graph.compile()
