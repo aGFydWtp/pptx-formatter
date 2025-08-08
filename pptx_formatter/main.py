@@ -6,6 +6,7 @@ from threading import Lock
 from typing import List, Optional
 
 from PIL import Image, ImageDraw
+
 from pptx import Presentation
 from langgraph.graph import END, StateGraph
 from langgraph.pregel import Pregel
